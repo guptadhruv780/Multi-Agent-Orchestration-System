@@ -1,0 +1,2114 @@
+================================================================================
+   FULL-STACK MULTI-AGENT ORCHESTRATION SYSTEM
+   PRD + SRS + CURSOR IMPLEMENTATION PROMPTS
+   Version 1.0 | Staff Engineer Level
+================================================================================
+
+TABLE OF CONTENTS
+-----------------
+PART 1: PRODUCT REQUIREMENTS DOCUMENT (PRD)
+  1.1  Executive Summary
+  1.2  Target Audience & Use Cases
+  1.3  Core Features
+  1.4  Success Metrics
+  1.5  Out of Scope (v1.0)
+
+PART 2: SOFTWARE REQUIREMENTS SPECIFICATION (SRS)
+  2.1  System Architecture
+  2.2  Technology Stack & Justification
+  2.3  State Schema Definition
+  2.4  Agent Prompts & Tooling
+  2.5  Real-Time Communication Protocol
+  2.6  Security & Sandbox Constraints
+  2.7  Error Handling & Limits
+
+PART 3: CURSOR IMPLEMENTATION PROMPTS (CHAPTER-WISE)
+  Chapter 01 - Project Scaffold & Environment Setup
+  Chapter 02 - LangGraph State Schema & Core Types
+  Chapter 03 - GitHub API Integration Layer
+  Chapter 04 - Research Agent
+  Chapter 05 - Coding Agent
+  Chapter 06 - Testing Agent & Docker Sandbox
+  Chapter 07 - PR Agent
+  Chapter 08 - Orchestrator & LangGraph Graph Assembly
+  Chapter 09 - FastAPI Backend & WebSocket Server
+  Chapter 10 - React Frontend - Project Setup & Layout
+  Chapter 11 - React Frontend - Dashboard & Real-Time Terminal
+  Chapter 12 - End-to-End Integration & Testing
+  Chapter 13 - Security Hardening & Production Config
+
+================================================================================
+PART 1: PRODUCT REQUIREMENTS DOCUMENT (PRD)
+================================================================================
+
+------------------------------------------------------------------------
+1.1 EXECUTIVE SUMMARY
+------------------------------------------------------------------------
+
+The Full-Stack Multi-Agent Orchestration System is an autonomous AI-powered
+software engineering platform that closes the gap between issue discovery and
+code delivery. It ingests a raw GitHub Issue URL, decomposes the problem into
+specialized sub-tasks, and — through a coordinated graph of AI agents —
+researches the repository, drafts a contextually-aware fix, validates it
+inside an isolated Docker sandbox, and opens a Pull Request, all without
+human intervention.
+
+The platform surfaces every agent action in real time via a React dashboard,
+giving engineers complete observability over the autonomous workflow. Unlike
+linear LLM chains, the system employs a stateful, cyclic LangGraph graph
+that self-corrects: if generated tests fail, the graph loops back to the
+Coding Agent with the error context, mimicking how a skilled engineer
+iterates until tests pass.
+
+Core Value Proposition:
+  - Reduces time-to-PR for well-scoped bugs from hours to minutes.
+  - Provides full auditability — every agent decision is logged and streamed.
+  - Architected for extensibility — new agents (security review, doc writer)
+    can be added as new LangGraph nodes without refactoring the core graph.
+
+------------------------------------------------------------------------
+1.2 TARGET AUDIENCE & USE CASES
+------------------------------------------------------------------------
+
+PRIMARY USERS:
+  A. Individual Open-Source Maintainers
+     - Scenario: A maintainer has 50+ open issues. They paste the issue URL
+       into the dashboard and let the system propose a fix as a draft PR
+       for their review.
+
+  B. Engineering Teams (10-100 engineers)
+     - Scenario: Triage bot. Newly opened issues tagged "bug" are
+       auto-submitted to the orchestration system. Accepted PRs reduce
+       junior engineer toil on repetitive bug classes.
+
+  C. Platform / DevEx Engineers
+     - Scenario: Internal tooling automation. The system is embedded in
+       CI/CD pipelines to auto-fix flaky tests or dependency version bumps.
+
+  D. AI/ML Engineers & Researchers
+     - Scenario: Benchmarking LLM coding capabilities on real-world repos
+       using SWE-bench style evaluation.
+
+USE CASES:
+  UC-01: Automated Bug Fix       - Issue describes a runtime error or wrong
+                                   output; system patches the relevant file.
+  UC-02: Test Gap Coverage       - Issue requests additional test coverage;
+                                   system generates and validates tests.
+  UC-03: Boilerplate Generation  - Issue requests a new CRUD endpoint or
+                                   configuration file.
+  UC-04: Dependency Upgrade      - Issue flags a deprecated package; system
+                                   updates imports and fixes breaking changes.
+  UC-05: Documentation Fix       - Issue notes outdated docstrings or README
+                                   sections; system corrects them.
+
+------------------------------------------------------------------------
+1.3 CORE FEATURES
+------------------------------------------------------------------------
+
+F-01: AGENT ROLES
+------------------
+  ORCHESTRATOR AGENT
+    - Role: Central controller / router. Does NOT perform coding tasks.
+    - Responsibilities: Reads current graph state, evaluates conditional
+      edges, decides next node to activate (Research → Code → Test → PR
+      or Code → Test → Code loop).
+    - Tool Access: State inspection only.
+
+  RESEARCH AGENT
+    - Role: Autonomous codebase analyst.
+    - Responsibilities: Fetches issue metadata, clones/browses repo via
+      GitHub API, identifies relevant files, methods, and dependencies,
+      builds a structured "context brief" for the Coding Agent.
+    - Tool Access: search_codebase(), read_file(), list_directory(),
+      get_issue_details(), get_repo_structure().
+
+  CODING AGENT
+    - Role: Code generation and patch creation.
+    - Responsibilities: Receives context brief + (on retry) test failure
+      logs. Produces a unified diff / concrete file patches. On iteration N>1,
+      analyzes the test error and refines its approach.
+    - Tool Access: read_file(), apply_patch(), write_file().
+
+  TESTING AGENT
+    - Role: Sandboxed validation gatekeeper.
+    - Responsibilities: Takes the patched files, spins up an ephemeral
+      Docker container with the project's environment, runs the existing
+      test suite + any newly generated tests, returns structured pass/fail
+      results with full stdout/stderr.
+    - Tool Access: run_docker_container(), read_test_output(),
+      install_dependencies().
+
+  PR AGENT
+    - Role: GitHub integration finisher.
+    - Responsibilities: Creates a feature branch, commits patched files,
+      opens a Pull Request with a structured description (problem, solution,
+      test evidence), and returns the PR URL.
+    - Tool Access: create_branch(), commit_files(), open_pull_request(),
+      add_pr_comment().
+
+F-02: STATEFUL CYCLIC WORKFLOW (SELF-CORRECTION LOOP)
+------------------------------------------------------
+  The graph operates on a persistent State object (TypedDict) that is
+  mutated and passed between nodes. The critical loop is:
+
+    [START]
+       │
+       ▼
+  [Research Agent] ──────────────────────────────────────────────────────┐
+       │                                                                  │
+       ▼                                                                  │
+  [Coding Agent] ◄─────────────────────────────────────┐                 │
+       │                                                │                 │
+       ▼                                                │                 │
+  [Testing Agent]                                       │                 │
+       │                                                │                 │
+       ├──── TESTS PASS ──────────────────────────────────────────────────┤
+       │                                                │                 │
+       └──── TESTS FAIL (retry_count < MAX_RETRIES) ───┘                 │
+       │                                                                  │
+       └──── TESTS FAIL (retry_count >= MAX_RETRIES) ──► [FAIL STATE]    │
+                                                                          │
+  [PR Agent] ◄──────────────────────────────────────────────────────────┘
+       │
+       ▼
+    [END]
+
+  State propagation rule: Each node receives the FULL state, appends its
+  output to the relevant fields, and returns the updated state. LangGraph
+  handles merging via its add_messages reducer pattern.
+
+F-03: USER INTERFACE & EXPERIENCE (UI/UX)
+------------------------------------------
+  DASHBOARD LAYOUT:
+    - Left Panel (30%): Input form (GitHub Issue URL, repo PAT, model
+      selector), run history sidebar.
+    - Right Panel (70%): Real-time execution terminal — streaming log
+      output from each agent, color-coded by agent type.
+
+  REAL-TIME TERMINAL FEATURES:
+    - Live streaming: Agent logs appear character-by-character (SSE/WS).
+    - Agent Status Indicators: Each agent has a pill badge:
+      [IDLE] [RUNNING] [COMPLETE] [FAILED].
+    - State Inspector: Collapsible JSON view of the current LangGraph
+      state after each node completion.
+    - File Diff Viewer: When Coding Agent completes, a syntax-highlighted
+      unified diff is rendered inline.
+    - Test Results Panel: Pass/fail table with expandable stdout/stderr.
+    - PR Link Card: On success, a clickable card with the PR URL.
+
+  UX PRINCIPLES:
+    - No page refresh required — all updates via WebSocket.
+    - Graceful degradation — if WebSocket drops, UI shows reconnect banner.
+    - Mobile responsive for monitoring (not for input).
+
+------------------------------------------------------------------------
+1.4 SUCCESS METRICS
+------------------------------------------------------------------------
+
+  SYSTEM PERFORMANCE:
+    SM-01: End-to-end task completion rate       Target: > 70% for "easy"
+                                                  SWE-bench class issues.
+    SM-02: Test pass rate on first Coding        Target: > 50% (no retry
+           Agent attempt                          needed).
+    SM-03: PR acceptance rate (human review)     Target: > 40% of auto-PRs
+                                                  merged without changes.
+    SM-04: Average task completion time          Target: < 3 minutes for
+                                                  single-file patches.
+    SM-05: Max retry loop depth before fail      Target: <= 3 retries.
+
+  RELIABILITY:
+    SM-06: Agent node error rate                 Target: < 2% unhandled
+                                                  exceptions per run.
+    SM-07: Docker sandbox cold start time        Target: < 15 seconds.
+
+  USER EXPERIENCE:
+    SM-08: WebSocket log delivery latency        Target: < 200ms from
+                                                  event to UI render.
+    SM-09: UI time-to-interactive                Target: < 1.5 seconds.
+    SM-10: WebSocket reconnection time           Target: < 3 seconds on
+                                                  drop.
+
+------------------------------------------------------------------------
+1.5 OUT OF SCOPE (VERSION 1.0)
+------------------------------------------------------------------------
+
+  OOS-01: Support for non-GitHub repositories (GitLab, Bitbucket).
+  OOS-02: Multi-repository cross-references or monorepo spanning.
+  OOS-03: Natural language chat with the running agents.
+  OOS-04: Autonomous issue creation (system only consumes, not creates).
+  OOS-05: User authentication / multi-tenancy (single-user mode only).
+  OOS-06: Persistent run history database (in-memory only in v1.0).
+  OOS-07: Agent fine-tuning or RLHF feedback loops.
+  OOS-08: Cost tracking / token budget enforcement UI.
+  OOS-09: Support for languages other than Python repositories.
+  OOS-10: Parallel multi-issue processing (one run at a time in v1.0).
+
+================================================================================
+PART 2: SOFTWARE REQUIREMENTS SPECIFICATION (SRS)
+================================================================================
+
+------------------------------------------------------------------------
+2.1 SYSTEM ARCHITECTURE (TEXT REPRESENTATION)
+------------------------------------------------------------------------
+
+LAYER DIAGRAM:
+==============
+
+  ┌─────────────────────────────────────────────────────────────────┐
+  │                     CLIENT LAYER (Browser)                       │
+  │  React 18 App                                                    │
+  │  ├── IssueInputForm (REST POST /api/runs)                       │
+  │  ├── AgentTerminal (WebSocket ws://host/ws/{run_id})            │
+  │  ├── StateDiffViewer (renders JSON state diffs)                 │
+  │  └── PRResultCard (renders final PR URL)                        │
+  └─────────────────────┬───────────────────────────────────────────┘
+                         │ HTTP REST + WebSocket (WS)
+  ┌─────────────────────▼───────────────────────────────────────────┐
+  │                  API GATEWAY LAYER (FastAPI)                     │
+  │  ├── POST   /api/runs          → Validates input, creates run   │
+  │  │           context, launches async background task            │
+  │  ├── GET    /api/runs/{id}     → Returns run status snapshot    │
+  │  ├── WS     /ws/{run_id}       → Persistent WebSocket channel   │
+  │  │           emitting SSE-style agent events                    │
+  │  └── GET    /api/runs/{id}/state → Returns full LangGraph state │
+  └─────────────────────┬───────────────────────────────────────────┘
+                         │ Python async (asyncio + threading bridge)
+  ┌─────────────────────▼───────────────────────────────────────────┐
+  │              ORCHESTRATION LAYER (LangGraph)                     │
+  │                                                                  │
+  │  StateGraph(AgentState)                                          │
+  │  ├── Node: research_node    → ResearchAgent.run(state)          │
+  │  ├── Node: coding_node      → CodingAgent.run(state)            │
+  │  ├── Node: testing_node     → TestingAgent.run(state)           │
+  │  ├── Node: pr_node          → PRAgent.run(state)                │
+  │  └── Edges:                                                      │
+  │       START → research_node                                      │
+  │       research_node → coding_node                                │
+  │       coding_node → testing_node                                 │
+  │       testing_node → [conditional_router]                        │
+  │         ├── "pass"  → pr_node                                   │
+  │         ├── "retry" → coding_node (retry_count < MAX)           │
+  │         └── "fail"  → END (with error state)                    │
+  │       pr_node → END                                              │
+  └─────────────────────┬───────────────────────────────────────────┘
+                         │
+         ┌───────────────┼────────────────────┐
+         ▼               ▼                    ▼
+  ┌─────────────┐  ┌──────────────┐  ┌──────────────────┐
+  │ GitHub API  │  │  Claude API  │  │  Docker Engine   │
+  │ (PyGithub)  │  │  (Anthropic) │  │  (docker-py SDK) │
+  │             │  │  or OpenAI   │  │  Sandboxed exec  │
+  └─────────────┘  └──────────────┘  └──────────────────┘
+
+LANGGRAPH NODE/EDGE DETAILED STRUCTURE:
+========================================
+
+  Graph Definition (Python pseudocode):
+
+    graph = StateGraph(AgentState)
+    graph.add_node("research",  research_node_fn)
+    graph.add_node("coding",    coding_node_fn)
+    graph.add_node("testing",   testing_node_fn)
+    graph.add_node("pr",        pr_node_fn)
+
+    graph.set_entry_point("research")
+    graph.add_edge("research", "coding")
+    graph.add_edge("coding",   "testing")
+    graph.add_conditional_edges(
+        "testing",
+        route_after_testing,          # conditional router function
+        {
+            "pass":  "pr",
+            "retry": "coding",
+            "fail":  END
+        }
+    )
+    graph.add_edge("pr", END)
+
+    checkpointer = MemorySaver()      # or SqliteSaver for persistence
+    app = graph.compile(checkpointer=checkpointer)
+
+  CONDITIONAL ROUTER LOGIC:
+
+    def route_after_testing(state: AgentState) -> str:
+        if state["test_result"]["status"] == "pass":
+            return "pass"
+        if state["retry_count"] < MAX_RETRIES:
+            return "retry"
+        return "fail"
+
+------------------------------------------------------------------------
+2.2 TECHNOLOGY STACK & JUSTIFICATION
+------------------------------------------------------------------------
+
+  BACKEND:
+  ┌─────────────────────┬────────────────────────────────────────────┐
+  │ Technology          │ Justification                              │
+  ├─────────────────────┼────────────────────────────────────────────┤
+  │ Python 3.11+        │ LangGraph, LangChain, and the AI SDK       │
+  │                     │ ecosystem are Python-first. Async/await    │
+  │                     │ support is mature and FastAPI integrates   │
+  │                     │ natively.                                  │
+  ├─────────────────────┼────────────────────────────────────────────┤
+  │ LangGraph 0.2+      │ Provides stateful, cyclic agent graphs     │
+  │                     │ with checkpointing. Unlike LangChain       │
+  │                     │ chains (linear), LangGraph supports        │
+  │                     │ conditional edges and self-correction       │
+  │                     │ loops natively. Built-in MemorySaver for  │
+  │                     │ state persistence between steps.           │
+  ├─────────────────────┼────────────────────────────────────────────┤
+  │ FastAPI 0.111+      │ ASGI framework with native async support,  │
+  │                     │ built-in WebSocket endpoints, Pydantic     │
+  │                     │ request validation, and automatic OpenAPI  │
+  │                     │ docs. Handles concurrent WS connections    │
+  │                     │ via anyio/uvicorn without thread blocking. │
+  ├─────────────────────┼────────────────────────────────────────────┤
+  │ WebSockets (native  │ FastAPI's websocket support over Starlette │
+  │ via Starlette)      │ allows direct async message pushing to     │
+  │                     │ connected clients. Chosen over Socket.IO   │
+  │                     │ to minimize dependency surface in v1.0.    │
+  │                     │ Socket.IO can be added if rooms/namespaces │
+  │                     │ are needed in v2.                          │
+  ├─────────────────────┼────────────────────────────────────────────┤
+  │ Docker SDK          │ docker-py allows programmatic container    │
+  │ (docker-py)         │ lifecycle management (create, run, kill,   │
+  │                     │ remove). Used by Testing Agent to spin up  │
+  │                     │ isolated execution environments with       │
+  │                     │ resource limits and no network access.     │
+  ├─────────────────────┼────────────────────────────────────────────┤
+  │ PyGithub / httpx    │ PyGithub wraps GitHub REST API. httpx used │
+  │                     │ for direct API calls where PyGithub lacks  │
+  │                     │ coverage (e.g., code search endpoints).    │
+  ├─────────────────────┼────────────────────────────────────────────┤
+  │ Anthropic SDK /     │ Claude claude-sonnet-4 for reasoning-heavy │
+  │ OpenAI SDK          │ tasks (Research, Coding). Model is         │
+  │                     │ configurable per agent via env vars.       │
+  └─────────────────────┴────────────────────────────────────────────┘
+
+  FRONTEND:
+  ┌─────────────────────┬────────────────────────────────────────────┐
+  │ React 18 + Vite     │ Component-based UI, fast HMR for dev,      │
+  │                     │ native useEffect hooks for WS lifecycle    │
+  │                     │ management.                                │
+  ├─────────────────────┼────────────────────────────────────────────┤
+  │ TailwindCSS         │ Utility-first styling, rapid dark-mode     │
+  │                     │ terminal-like UI without custom CSS files. │
+  ├─────────────────────┼────────────────────────────────────────────┤
+  │ xterm.js            │ Full-featured terminal emulator for the    │
+  │                     │ browser. Renders ANSI color codes from     │
+  │                     │ agent logs natively.                       │
+  ├─────────────────────┼────────────────────────────────────────────┤
+  │ Monaco Editor /     │ Syntax-highlighted diff viewer for the     │
+  │ react-diff-viewer   │ code patches generated by Coding Agent.   │
+  └─────────────────────┴────────────────────────────────────────────┘
+
+------------------------------------------------------------------------
+2.3 STATE SCHEMA DEFINITION
+------------------------------------------------------------------------
+
+  # File: backend/core/state.py
+
+  from typing import TypedDict, Annotated, Optional, List
+  from operator import add
+  import operator
+
+  class FileChange(TypedDict):
+      file_path: str            # Relative path in repo
+      original_content: str     # Content before patch
+      patched_content: str      # Content after patch
+      diff: str                 # Unified diff string
+
+  class TestResult(TypedDict):
+      status: str               # "pass" | "fail" | "error"
+      total_tests: int
+      passed: int
+      failed: int
+      errors: int
+      stdout: str               # Full test runner output
+      stderr: str               # Error output from container
+      exit_code: int            # Docker container exit code
+
+  class AgentLog(TypedDict):
+      agent_name: str           # "research" | "coding" | "testing" | "pr"
+      level: str                # "info" | "warning" | "error"
+      message: str
+      timestamp: str            # ISO 8601
+
+  class AgentState(TypedDict):
+      # --- INPUT FIELDS (set once at graph entry) ---
+      run_id:          str                      # UUID for this execution
+      issue_url:       str                      # Full GitHub issue URL
+      repo_owner:      str                      # Parsed from issue_url
+      repo_name:       str                      # Parsed from issue_url
+      issue_number:    int                      # Parsed from issue_url
+      github_token:    str                      # PAT for API calls
+      model_name:      str                      # e.g. "claude-sonnet-4"
+
+      # --- RESEARCH AGENT OUTPUT ---
+      issue_title:     Optional[str]
+      issue_body:      Optional[str]
+      relevant_files:  Optional[List[str]]      # List of file paths
+      codebase_context: Optional[str]           # Formatted context brief
+      repo_structure:  Optional[str]            # Directory tree string
+
+      # --- CODING AGENT OUTPUT ---
+      file_changes:    Optional[List[FileChange]]
+      patch_summary:   Optional[str]            # Human-readable change desc
+
+      # --- TESTING AGENT OUTPUT ---
+      test_result:     Optional[TestResult]
+      retry_count:     int                      # Default 0, incremented on loop
+
+      # --- PR AGENT OUTPUT ---
+      branch_name:     Optional[str]
+      pr_url:          Optional[str]
+      pr_number:       Optional[int]
+
+      # --- SHARED / SYSTEM FIELDS ---
+      # Annotated[List, add] enables LangGraph to APPEND logs (not overwrite)
+      logs:            Annotated[List[AgentLog], add]
+      current_node:    str                      # Updated by each node
+      final_status:    str                      # "running"|"success"|"failed"
+      error_message:   Optional[str]            # Set on unhandled exceptions
+
+  STATE MUTATION RULES:
+    - Nodes must return ONLY the fields they modify (partial dict update).
+    - The `logs` field uses the `add` reducer — all agents append to it.
+    - The `retry_count` field is incremented in the router, not in nodes.
+    - `current_node` is set at the START of each node function for live
+      streaming awareness.
+
+------------------------------------------------------------------------
+2.4 AGENT PROMPTS & TOOLING
+------------------------------------------------------------------------
+
+  RESEARCH AGENT SYSTEM PROMPT:
+  --------------------------------
+  You are an expert software engineering analyst. Your task is to fully
+  understand a GitHub issue and the relevant portion of the codebase so
+  that a Coding Agent can fix the issue without additional context.
+
+  You will be given:
+    - The full text of a GitHub issue (title + body)
+    - The top-level repository structure
+
+  Your job:
+    1. Identify the ROOT CAUSE of the issue based on the description.
+    2. Identify WHICH FILES are most likely responsible for the bug.
+    3. Read those files using the available tools.
+    4. Identify the EXACT functions, classes, or lines that need to change.
+    5. Check for RELATED TESTS that already exist for this code path.
+    6. Produce a structured "Context Brief" in this exact JSON format:
+       {
+         "root_cause_analysis": "...",
+         "files_to_modify": ["path/to/file.py", ...],
+         "relevant_code_snippets": {"path/to/file.py": "...snippet..."},
+         "existing_tests": ["tests/test_file.py"],
+         "suggested_approach": "...",
+         "dependencies_to_check": ["module_name", ...]
+       }
+
+  RESEARCH AGENT TOOLS:
+    - get_issue_details(owner, repo, issue_number) → dict
+    - get_repo_structure(owner, repo, path="") → str (directory tree)
+    - read_file(owner, repo, file_path, ref="main") → str (file content)
+    - search_codebase(owner, repo, query) → List[dict] (code search results)
+    - list_directory(owner, repo, path) → List[str]
+
+  ---
+
+  CODING AGENT SYSTEM PROMPT:
+  --------------------------------
+  You are an expert Python software engineer. Your task is to write the
+  minimal, correct code fix for a GitHub issue based on a provided
+  Context Brief.
+
+  You will be given:
+    - A structured Context Brief from the Research Agent (JSON)
+    - The full content of relevant files
+    - [On retry] The test failure output from the previous attempt
+
+  Rules:
+    1. Make the MINIMAL change necessary to fix the issue. Do NOT refactor
+       unrelated code.
+    2. Follow the existing code style (PEP 8, naming conventions,
+       docstring format).
+    3. If the issue requests new functionality, write tests for it.
+    4. ALWAYS return your output in this EXACT JSON format:
+       {
+         "patch_summary": "One-sentence description of the fix",
+         "file_changes": [
+           {
+             "file_path": "relative/path/to/file.py",
+             "patched_content": "...FULL file content after fix...",
+             "change_description": "What was changed and why"
+           }
+         ],
+         "new_test_file": {
+           "file_path": "tests/test_new_feature.py",
+           "content": "...test file content..."
+         }
+       }
+
+  [ON RETRY - append to prompt]:
+    IMPORTANT: Your previous fix failed the test suite. Here is the
+    failure output:
+    --- TEST FAILURE LOG ---
+    {test_result.stdout}
+    {test_result.stderr}
+    --- END LOG ---
+    Analyze the failure, identify what was wrong in your previous patch,
+    and produce a corrected fix.
+
+  CODING AGENT TOOLS:
+    - read_file(owner, repo, file_path, ref="main") → str
+    - apply_patch(file_path, patched_content) → bool (writes to temp dir)
+    - write_file(file_path, content) → bool (writes to temp workspace)
+
+  ---
+
+  TESTING AGENT SYSTEM PROMPT:
+    (Testing Agent is primarily tool-driven, not LLM-driven in v1.0.
+     It uses deterministic logic to run Docker and parse output.)
+
+  TESTING AGENT TOOLS:
+    - prepare_workspace(file_changes) → str (temp dir path)
+    - build_docker_image(workspace_path, base_image) → str (image_id)
+    - run_docker_container(image_id, test_command, timeout=120) → dict
+      Returns: {exit_code, stdout, stderr}
+    - parse_pytest_output(stdout) → TestResult
+    - cleanup_container(container_id) → None
+
+  ---
+
+  PR AGENT SYSTEM PROMPT:
+  --------------------------------
+  You are a GitHub automation agent. Your task is to create a well-
+  structured Pull Request for a code fix that has already passed all tests.
+
+  Generate a PR description in this format:
+    ## Summary
+    [One paragraph describing what was fixed and why]
+
+    ## Changes Made
+    - [File]: [What changed]
+
+    ## Test Evidence
+    - Tests run: {total_tests}
+    - Tests passed: {passed}
+    - Test command: `pytest tests/`
+
+    ## Related Issue
+    Closes #{issue_number}
+
+  PR AGENT TOOLS:
+    - create_branch(owner, repo, branch_name, base_branch="main") → str
+    - commit_files(owner, repo, branch, file_changes, message) → str
+    - open_pull_request(owner, repo, title, body, head, base) → dict
+      Returns: {pr_url, pr_number}
+
+------------------------------------------------------------------------
+2.5 REAL-TIME COMMUNICATION PROTOCOL
+------------------------------------------------------------------------
+
+  ARCHITECTURE: LangGraph → Event Queue → FastAPI WS → React Client
+
+  STEP 1: Event Emission from LangGraph
+  ----------------------------------------
+  Each LangGraph node function receives a shared asyncio.Queue (injected
+  via the config["configurable"] mechanism). Nodes call:
+
+    await config["configurable"]["event_queue"].put({
+        "type":      "agent_log",
+        "run_id":    state["run_id"],
+        "agent":     "research",
+        "level":     "info",
+        "message":   "Reading file: src/models/user.py",
+        "timestamp": datetime.utcnow().isoformat()
+    })
+
+  EVENT TYPES:
+    - "agent_log"       → A log line from an agent (most common)
+    - "node_start"      → An agent node has begun execution
+    - "node_complete"   → An agent node has finished
+    - "state_update"    → Full state snapshot (sent after each node)
+    - "diff_ready"      → Coding agent produced a patch (includes diff)
+    - "test_result"     → Testing agent results summary
+    - "pr_created"      → PR URL available
+    - "run_failed"      → Terminal failure event
+    - "run_complete"    → Successful completion event
+
+  STEP 2: FastAPI WebSocket Handler
+  ------------------------------------
+  # File: backend/api/websocket.py
+
+  @router.websocket("/ws/{run_id}")
+  async def websocket_endpoint(websocket: WebSocket, run_id: str):
+      await websocket.accept()
+      
+      # Retrieve the event queue for this run
+      event_queue = run_manager.get_queue(run_id)
+      if not event_queue:
+          await websocket.close(code=4004, reason="Run not found")
+          return
+      
+      try:
+          while True:
+              # Wait for event from LangGraph (with timeout for ping)
+              try:
+                  event = await asyncio.wait_for(
+                      event_queue.get(),
+                      timeout=30.0
+                  )
+              except asyncio.TimeoutError:
+                  # Send keepalive ping
+                  await websocket.send_json({"type": "ping"})
+                  continue
+              
+              # Send event to client
+              await websocket.send_json(event)
+              
+              # Terminal events: close connection cleanly
+              if event["type"] in ("run_complete", "run_failed"):
+                  break
+                  
+      except WebSocketDisconnect:
+          # Client disconnected — the LangGraph task continues running
+          # in the background. State is preserved in checkpointer.
+          run_manager.mark_disconnected(run_id)
+      finally:
+          await websocket.close()
+
+  STEP 3: React Client WebSocket Hook
+  ---------------------------------------
+  // File: frontend/src/hooks/useAgentStream.ts
+
+  export function useAgentStream(runId: string | null) {
+    const [logs, setLogs] = useState<AgentLog[]>([]);
+    const [state, setState] = useState<AgentState | null>(null);
+    const [status, setStatus] = useState<"idle"|"running"|"done"|"failed">();
+    const wsRef = useRef<WebSocket | null>(null);
+
+    useEffect(() => {
+      if (!runId) return;
+
+      const connect = () => {
+        const ws = new WebSocket(`ws://localhost:8000/ws/${runId}`);
+        wsRef.current = ws;
+
+        ws.onmessage = (event) => {
+          const data = JSON.parse(event.data);
+          switch (data.type) {
+            case "agent_log":
+              setLogs(prev => [...prev, data]);
+              break;
+            case "state_update":
+              setState(data.state);
+              break;
+            case "run_complete":
+              setStatus("done");
+              break;
+            case "run_failed":
+              setStatus("failed");
+              break;
+          }
+        };
+
+        ws.onclose = (event) => {
+          if (event.code !== 1000 && status === "running") {
+            // Reconnect after 2 seconds on unexpected close
+            setTimeout(connect, 2000);
+          }
+        };
+      };
+
+      connect();
+      return () => wsRef.current?.close(1000);
+    }, [runId]);
+
+    return { logs, state, status };
+  }
+
+------------------------------------------------------------------------
+2.6 SECURITY & SANDBOX CONSTRAINTS
+------------------------------------------------------------------------
+
+  DOCKER SANDBOX CONFIGURATION:
+  --------------------------------
+  Each test run executes inside a hardened container:
+
+    container_config = {
+        "image":        "python:3.11-slim",
+        "command":      ["pytest", "tests/", "-v", "--tb=short",
+                         "--timeout=60"],
+        "volumes":      {workspace_path: {"bind": "/app", "mode": "ro"}},
+        # READ-ONLY bind mount — container cannot write to host filesystem
+
+        "network_mode": "none",
+        # No network access — prevents exfiltration, package downloads,
+        # or calling external services from test code
+
+        "mem_limit":    "512m",
+        # Memory cap prevents fork bombs and OOM on host
+
+        "cpu_period":   100000,
+        "cpu_quota":    50000,
+        # 0.5 CPU cap — prevents CPU exhaustion
+
+        "read_only":    True,
+        # Root filesystem read-only
+
+        "tmpfs":        {"/tmp": "size=64m,exec"},
+        # Writable /tmp only (for pytest temp files), limited size
+
+        "security_opt": ["no-new-privileges:true"],
+        # Prevent privilege escalation via setuid
+
+        "cap_drop":     ["ALL"],
+        # Drop ALL Linux capabilities
+
+        "user":         "nobody",
+        # Run as unprivileged user
+    }
+
+  GITHUB TOKEN SECURITY:
+    - PAT stored in request context only (never logged, never written
+      to disk, never included in LangGraph state snapshots emitted to
+      frontend).
+    - Token is injected as environment variable into agent tool calls,
+      never as a string in LLM prompts.
+    - Minimum required scopes: repo:read, pull_requests:write.
+
+  INPUT VALIDATION:
+    - Issue URL must match regex:
+      ^https://github\.com/[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+/issues/\d+$
+    - Repository must be public OR token must have access (validated
+      before graph start via test API call).
+
+------------------------------------------------------------------------
+2.7 ERROR HANDLING & LIMITS
+------------------------------------------------------------------------
+
+  INFINITE LOOP PREVENTION:
+    MAX_RETRIES = 3  (configurable via env var AGENT_MAX_RETRIES)
+
+    After MAX_RETRIES coding attempts, the graph routes to END with:
+      state["final_status"] = "failed"
+      state["error_message"] = "Max retries exceeded. Tests did not pass
+                                 after {MAX_RETRIES} attempts."
+    A "run_failed" WebSocket event is emitted with the last test output.
+
+  PER-NODE TIMEOUTS:
+    - Research Agent:  120 seconds (large repos may require many API calls)
+    - Coding Agent:    60 seconds per LLM call
+    - Testing Agent:   180 seconds (Docker build + test run)
+    - PR Agent:        30 seconds
+
+  WEBSOCKET DISCONNECTION HANDLING:
+    - If client disconnects mid-run, the LangGraph graph CONTINUES running
+      in the background (async task is independent of WS connection).
+    - The event queue buffers up to 1000 events per run.
+    - On client reconnect (same run_id), buffered events are replayed
+      in order before switching to live streaming.
+    - If the WS handler crashes, it does not affect the graph execution.
+
+  LLM API ERROR HANDLING:
+    - Exponential backoff with 3 retries on rate limit (429) errors.
+    - On non-retriable errors (400, 401), node returns error state
+      immediately and graph routes to END.
+
+  DOCKER FAILURE HANDLING:
+    - If Docker daemon is unreachable: fail fast with clear error message.
+    - If container OOM-killed: TestResult.status = "error",
+      stderr = "Container killed: memory limit exceeded".
+    - Container is always removed (docker rm --force) in a finally block.
+
+================================================================================
+PART 3: CURSOR IMPLEMENTATION PROMPTS (CHAPTER-WISE)
+================================================================================
+
+These prompts are designed to be used sequentially in Cursor IDE.
+Each chapter builds on the previous one. Copy the ENTIRE chapter prompt
+into Cursor's chat/composer window.
+
+================================================================================
+CHAPTER 01: PROJECT SCAFFOLD & ENVIRONMENT SETUP
+================================================================================
+
+CURSOR PROMPT - CHAPTER 01:
+----------------------------
+I am building a Full-Stack Multi-Agent Orchestration System. This is Chapter 1:
+Project Scaffold. Set up the complete project structure exactly as specified.
+
+CREATE the following directory structure from the project root:
+
+multi-agent-orchestration/
+├── backend/
+│   ├── main.py                    # FastAPI app entry point
+│   ├── requirements.txt
+│   ├── .env.example
+│   ├── core/
+│   │   ├── __init__.py
+│   │   ├── state.py               # LangGraph AgentState TypedDict
+│   │   ├── config.py              # Settings via pydantic-settings
+│   │   └── run_manager.py         # Manages run contexts + event queues
+│   ├── agents/
+│   │   ├── __init__.py
+│   │   ├── research_agent.py
+│   │   ├── coding_agent.py
+│   │   ├── testing_agent.py
+│   │   └── pr_agent.py
+│   ├── graph/
+│   │   ├── __init__.py
+│   │   ├── orchestrator.py        # LangGraph StateGraph assembly
+│   │   └── router.py              # Conditional edge routing logic
+│   ├── tools/
+│   │   ├── __init__.py
+│   │   ├── github_tools.py        # GitHub API wrapper functions
+│   │   └── docker_tools.py        # Docker SDK wrapper functions
+│   └── api/
+│       ├── __init__.py
+│       ├── routes.py              # REST endpoints
+│       └── websocket.py           # WebSocket endpoint
+│
+└── frontend/
+    ├── package.json
+    ├── vite.config.ts
+    ├── tailwind.config.js
+    ├── index.html
+    └── src/
+        ├── main.tsx
+        ├── App.tsx
+        ├── types/
+        │   └── agent.ts            # TypeScript interfaces matching AgentState
+        ├── hooks/
+        │   └── useAgentStream.ts   # WebSocket hook
+        ├── components/
+        │   ├── IssueInputForm.tsx
+        │   ├── AgentTerminal.tsx
+        │   ├── AgentStatusBar.tsx
+        │   ├── DiffViewer.tsx
+        │   ├── TestResultPanel.tsx
+        │   └── PRResultCard.tsx
+        └── pages/
+            └── Dashboard.tsx
+
+GENERATE these files with working content:
+
+1. backend/requirements.txt:
+   Include: fastapi>=0.111.0, uvicorn[standard], langgraph>=0.2.0,
+   langchain-anthropic, langchain-openai, pygithub, docker, python-dotenv,
+   pydantic-settings, websockets, httpx, pytest, python-multipart
+
+2. backend/.env.example:
+   ANTHROPIC_API_KEY=your_key_here
+   OPENAI_API_KEY=your_key_here
+   GITHUB_TOKEN=your_pat_here
+   DEFAULT_MODEL=claude-sonnet-4-20250514
+   MAX_RETRIES=3
+   DOCKER_BASE_IMAGE=python:3.11-slim
+   BACKEND_HOST=0.0.0.0
+   BACKEND_PORT=8000
+   FRONTEND_URL=http://localhost:5173
+
+3. backend/core/config.py:
+   Use pydantic-settings BaseSettings. Load from .env. Add a
+   get_settings() function with lru_cache. Include all env vars above.
+
+4. backend/main.py:
+   FastAPI app with CORS middleware (allow origin from settings.FRONTEND_URL),
+   include the api router and websocket router.
+   Add a health check endpoint GET /health → {"status": "ok"}.
+   Use uvicorn to run on host/port from settings.
+
+5. frontend/package.json:
+   React 18, TypeScript, Vite, TailwindCSS, xterm, xterm-addon-fit,
+   @xterm/xterm, react-diff-viewer-continued, lucide-react.
+   Include dev dependencies: @types/react, @types/react-dom, autoprefixer,
+   postcss, tailwindcss.
+
+6. frontend/vite.config.ts:
+   Configure proxy: /api and /ws routes proxy to http://localhost:8000
+   and ws://localhost:8000 respectively.
+
+After generating all files, provide instructions to:
+  - Create and activate a Python venv
+  - pip install -r requirements.txt
+  - npm install in frontend/
+  - Copy .env.example to .env
+
+================================================================================
+CHAPTER 02: LANGGRAPH STATE SCHEMA & CORE TYPES
+================================================================================
+
+CURSOR PROMPT - CHAPTER 02:
+----------------------------
+This is Chapter 2 of the Multi-Agent Orchestration System.
+We are defining the core data types that flow through the entire system.
+
+TASK: Implement the following files completely with all type definitions,
+docstrings, and helper methods.
+
+FILE 1: backend/core/state.py
+------------------------------
+Implement the following TypedDict classes exactly:
+
+from typing import TypedDict, Annotated, Optional, List, Literal
+from operator import add
+
+class FileChange(TypedDict):
+    file_path: str
+    original_content: str
+    patched_content: str
+    diff: str
+    change_description: str
+
+class TestResult(TypedDict):
+    status: Literal["pass", "fail", "error", "pending"]
+    total_tests: int
+    passed: int
+    failed: int
+    errors: int
+    stdout: str
+    stderr: str
+    exit_code: int
+    duration_seconds: float
+
+class AgentLog(TypedDict):
+    agent_name: Literal["research", "coding", "testing", "pr", "system"]
+    level: Literal["info", "warning", "error", "debug"]
+    message: str
+    timestamp: str
+
+class AgentState(TypedDict):
+    # Input fields
+    run_id: str
+    issue_url: str
+    repo_owner: str
+    repo_name: str
+    issue_number: int
+    github_token: str
+    model_name: str
+
+    # Research agent output
+    issue_title: Optional[str]
+    issue_body: Optional[str]
+    relevant_files: Optional[List[str]]
+    codebase_context: Optional[str]
+    repo_structure: Optional[str]
+
+    # Coding agent output
+    file_changes: Optional[List[FileChange]]
+    patch_summary: Optional[str]
+
+    # Testing agent output
+    test_result: Optional[TestResult]
+    retry_count: int
+
+    # PR agent output
+    branch_name: Optional[str]
+    pr_url: Optional[str]
+    pr_number: Optional[int]
+
+    # System fields
+    logs: Annotated[List[AgentLog], add]
+    current_node: str
+    final_status: Literal["running", "success", "failed"]
+    error_message: Optional[str]
+
+Also add a helper function:
+  def create_initial_state(run_id, issue_url, github_token, model_name) -> AgentState
+  This function:
+    - Parses issue_url to extract repo_owner, repo_name, issue_number
+      using a regex: r"github\.com/([^/]+)/([^/]+)/issues/(\d+)"
+    - Raises ValueError if URL format is invalid
+    - Returns AgentState with all optional fields as None, retry_count=0,
+      logs=[], current_node="", final_status="running"
+
+FILE 2: backend/core/run_manager.py
+--------------------------------------
+Implement a RunManager class:
+  - Uses a dict to store: {run_id: {"queue": asyncio.Queue, "status": str,
+    "state": AgentState, "connected": bool}}
+  - Methods:
+    * create_run(run_id, initial_state) → asyncio.Queue
+      Creates queue with maxsize=1000, stores in dict
+    * get_queue(run_id) → Optional[asyncio.Queue]
+    * update_state(run_id, state_update: dict) → None
+    * get_state(run_id) → Optional[AgentState]
+    * mark_disconnected(run_id) → None
+    * mark_connected(run_id) → None
+    * cleanup_run(run_id) → None (removes from dict)
+  - Add a global singleton: run_manager = RunManager()
+  - Add a helper: async def emit_event(run_id, event_type, **kwargs)
+    that creates an AgentLog-compatible event dict and puts it to the queue.
+
+FILE 3: frontend/src/types/agent.ts
+--------------------------------------
+Create TypeScript interfaces matching the Python TypedDict exactly:
+  - FileChange, TestResult, AgentLog, AgentState
+  - AgentEvent (union type for all WebSocket event types)
+  - RunStatus type
+  - Use proper TypeScript literal union types matching Python Literal types.
+
+Ensure all three files are complete, have no placeholder comments,
+and include proper imports.
+
+================================================================================
+CHAPTER 03: GITHUB API INTEGRATION LAYER
+================================================================================
+
+CURSOR PROMPT - CHAPTER 03:
+----------------------------
+This is Chapter 3 of the Multi-Agent Orchestration System.
+We are building the GitHub API tool layer used by the Research, Coding,
+and PR agents.
+
+FILE: backend/tools/github_tools.py
+--------------------------------------
+Implement a GitHubTools class with the following methods.
+Use the PyGithub library (github.Github) AND httpx for code search.
+All methods should have proper error handling and raise descriptive
+exceptions on failure.
+
+Methods to implement:
+
+1. __init__(self, token: str)
+   Initializes github.Github client with the token.
+
+2. get_issue_details(self, owner: str, repo: str, issue_number: int) -> dict
+   Returns: {title, body, labels, state, created_at, comments_count}
+   Uses PyGithub repo.get_issue(issue_number)
+
+3. get_repo_structure(self, owner: str, repo: str, path: str = "",
+                       max_depth: int = 3) -> str
+   Returns a formatted directory tree string (like `tree` command output).
+   Uses PyGithub repo.get_contents(path) recursively up to max_depth.
+   Excludes: .git/, __pycache__/, node_modules/, .venv/, *.pyc files.
+   Format each line as: "  " * depth + ("📁 " or "📄 ") + name
+
+4. read_file(self, owner: str, repo: str, file_path: str,
+             ref: str = "main") -> str
+   Returns decoded file content as string.
+   Raises FileNotFoundError if path doesn't exist.
+   Raises ValueError if file exceeds 500KB (too large for context).
+
+5. list_directory(self, owner: str, repo: str, path: str) -> List[str]
+   Returns list of file/directory names at the given path.
+
+6. search_codebase(self, owner: str, repo: str, query: str) -> List[dict]
+   Uses GitHub Code Search API via httpx (GET /search/code).
+   URL: https://api.github.com/search/code?q={query}+repo:{owner}/{repo}
+   Returns: [{path, name, html_url, snippet}] — limit to 10 results.
+   Add Authorization header with token.
+
+7. create_branch(self, owner: str, repo: str, branch_name: str,
+                  base_branch: str = "main") -> str
+   Creates new branch from base_branch HEAD SHA.
+   Returns the new branch name.
+   If branch already exists, append a timestamp suffix.
+
+8. commit_files(self, owner: str, repo: str, branch: str,
+                 file_changes: List[dict], commit_message: str) -> str
+   For each file_change in file_changes:
+     - Try to get existing file SHA (for update) or None (for create)
+     - Call repo.create_file() or repo.update_file()
+   Returns the commit SHA.
+
+9. open_pull_request(self, owner: str, repo: str, title: str, body: str,
+                      head: str, base: str = "main") -> dict
+   Creates PR using PyGithub repo.create_pull().
+   Returns: {pr_url: pr.html_url, pr_number: pr.number}
+
+Add a module-level function:
+  def get_github_tools(token: str) -> GitHubTools
+  Returns cached GitHubTools instance (cache by token hash).
+
+Include comprehensive docstrings for every method.
+Add rate limit handling: if PyGithub raises RateLimitExceededException,
+wait for rate limit reset time and retry once.
+
+================================================================================
+CHAPTER 04: RESEARCH AGENT
+================================================================================
+
+CURSOR PROMPT - CHAPTER 04:
+----------------------------
+This is Chapter 4 of the Multi-Agent Orchestration System.
+We are implementing the Research Agent — the first node in the LangGraph graph.
+
+FILE: backend/agents/research_agent.py
+----------------------------------------
+Implement a complete ResearchAgent class AND the LangGraph node function.
+
+CLASS: ResearchAgent
+  __init__(self, model_name: str, github_tools: GitHubTools)
+    - Initializes LLM: use ChatAnthropic if model contains "claude",
+      else ChatOpenAI
+    - Stores github_tools reference
+
+  async def run(self, state: AgentState,
+                event_queue: asyncio.Queue) -> dict
+    (This is the main method called by the LangGraph node)
+
+    Step 1: Emit "node_start" event (agent="research")
+    Step 2: Fetch issue details using github_tools.get_issue_details()
+    Step 3: Fetch repo structure using github_tools.get_repo_structure()
+    Step 4: Emit log "Analyzing issue and repository structure..."
+    Step 5: Call self._analyze_with_llm(issue_data, repo_structure, state)
+    Step 6: For each file in the returned relevant_files list:
+              - Read file content using github_tools.read_file()
+              - Emit log "Reading file: {file_path}"
+              - Build context string
+    Step 7: Emit "node_complete" event
+    Step 8: Return partial state update dict:
+            {
+              "issue_title": ...,
+              "issue_body": ...,
+              "relevant_files": [...],
+              "codebase_context": ...,
+              "repo_structure": ...,
+              "current_node": "research",
+              "logs": [AgentLog(agent_name="research", ...)]
+            }
+
+  async def _analyze_with_llm(self, issue_data, repo_structure,
+                                state) -> dict
+    Builds the Research Agent system prompt (from SRS section 2.4).
+    Creates a HumanMessage with:
+      - Issue title and body
+      - Repository structure
+    Calls LLM with tool binding for:
+      search_codebase (as a LangChain Tool wrapping github_tools.search_codebase)
+    Parses JSON response to extract: relevant_files, root_cause_analysis,
+    suggested_approach.
+    Returns dict with extracted values.
+
+LANGGRAPH NODE FUNCTION:
+  async def research_node(state: AgentState,
+                          config: RunnableConfig) -> dict:
+    """LangGraph node function for the Research Agent."""
+    event_queue = config["configurable"]["event_queue"]
+    github_tools = get_github_tools(state["github_token"])
+    agent = ResearchAgent(state["model_name"], github_tools)
+    
+    try:
+        return await agent.run(state, event_queue)
+    except Exception as e:
+        await emit_event(state["run_id"], "agent_log",
+                         agent="research", level="error",
+                         message=f"Research agent failed: {str(e)}")
+        return {
+            "final_status": "failed",
+            "error_message": f"Research agent error: {str(e)}",
+            "logs": [AgentLog(agent_name="research", level="error",
+                              message=str(e),
+                              timestamp=datetime.utcnow().isoformat())]
+        }
+
+Ensure all imports are correct. The file should be fully runnable.
+
+================================================================================
+CHAPTER 05: CODING AGENT
+================================================================================
+
+CURSOR PROMPT - CHAPTER 05:
+----------------------------
+This is Chapter 5 of the Multi-Agent Orchestration System.
+We are implementing the Coding Agent — the node that generates code fixes.
+
+FILE: backend/agents/coding_agent.py
+--------------------------------------
+Implement a CodingAgent class AND LangGraph node function.
+
+CLASS: CodingAgent
+  __init__(self, model_name: str, github_tools: GitHubTools,
+            workspace_dir: str)
+    - Initializes LLM (Claude or OpenAI based on model_name)
+    - workspace_dir: temp directory where patches will be written
+
+  async def run(self, state: AgentState,
+                event_queue: asyncio.Queue) -> dict
+    Step 1: Emit "node_start" event
+    Step 2: Build the system prompt using _build_system_prompt(state)
+            (Include retry context if state["retry_count"] > 0)
+    Step 3: Emit "Generating code fix..." log
+    Step 4: Call LLM with the system prompt and codebase_context
+    Step 5: Parse LLM JSON response to extract FileChange list
+    Step 6: For each FileChange:
+              - Read original file content from GitHub
+              - Generate unified diff using difflib.unified_diff()
+              - Write patched_content to workspace_dir/{file_path}
+              - Emit "Patch applied: {file_path}" log
+    Step 7: Emit "diff_ready" event with the full diff
+    Step 8: Emit "node_complete" event
+    Step 9: Return partial state update:
+            {
+              "file_changes": [...],
+              "patch_summary": ...,
+              "retry_count": state["retry_count"],
+              "current_node": "coding",
+              "logs": [...]
+            }
+
+  def _build_system_prompt(self, state: AgentState) -> str
+    Builds the Coding Agent system prompt from SRS section 2.4.
+    If state["retry_count"] > 0 AND state["test_result"] is not None:
+      Appends the retry section with test_result.stdout and stderr.
+    Returns full prompt string.
+
+  def _parse_llm_response(self, response_text: str) -> dict
+    Strips markdown code fences (```json ... ```) before parsing.
+    Parses JSON and returns the file_changes list.
+    Raises ValueError with clear message if JSON is malformed.
+
+LANGGRAPH NODE FUNCTION:
+  async def coding_node(state: AgentState, config: RunnableConfig) -> dict
+    Retrieve event_queue from config["configurable"].
+    Use a temporary workspace: create tempfile.mkdtemp() if not exists.
+    Store workspace path in config["configurable"] for reuse on retry.
+    Instantiate CodingAgent and call run().
+    On exception: return error state (same pattern as Chapter 04).
+
+IMPORTANT IMPLEMENTATION DETAILS:
+  - The workspace_dir must persist across retries (same run, same dir).
+  - Use difflib.unified_diff() to create diffs:
+      import difflib
+      diff = "".join(difflib.unified_diff(
+          original.splitlines(keepends=True),
+          patched.splitlines(keepends=True),
+          fromfile=f"a/{file_path}",
+          tofile=f"b/{file_path}"
+      ))
+  - Emit the diff as a "diff_ready" event so the frontend can render it.
+
+================================================================================
+CHAPTER 06: TESTING AGENT & DOCKER SANDBOX
+================================================================================
+
+CURSOR PROMPT - CHAPTER 06:
+----------------------------
+This is Chapter 6 of the Multi-Agent Orchestration System.
+This is the most security-sensitive chapter. We are implementing the
+Testing Agent with its Docker sandbox.
+
+FILE: backend/tools/docker_tools.py
+--------------------------------------
+Implement a DockerSandbox class:
+
+  __init__(self)
+    Initializes docker.from_env() client.
+    Raises RuntimeError with clear message if Docker is not available.
+
+  def prepare_workspace(self, file_changes: List[FileChange],
+                         base_workspace: str) -> str
+    Copies the patched files from base_workspace into a NEW temp directory.
+    Returns the new temp directory path.
+    This directory will be bind-mounted read-only into the container.
+
+  def run_tests(self, workspace_path: str,
+                 requirements_file: Optional[str] = None,
+                 test_command: str = "pytest tests/ -v --tb=short",
+                 timeout: int = 180) -> TestResult
+    Creates and runs a Docker container with these EXACT security settings:
+      image: "python:3.11-slim"
+      volumes: {workspace_path: {"bind": "/app", "mode": "ro"}}
+      working_dir: "/app"
+      command: ["sh", "-c",
+                "pip install -r requirements.txt -q 2>/dev/null; " + test_command]
+      network_mode: "none"
+      mem_limit: "512m"
+      cpu_period: 100000
+      cpu_quota: 50000
+      read_only: True
+      tmpfs: {"/tmp": "size=64m", "/root": "size=32m"}
+      security_opt: ["no-new-privileges:true"]
+      cap_drop: ["ALL"]
+
+    Run with: client.containers.run(..., detach=True)
+    Wait with: container.wait(timeout=timeout)
+    Get logs: container.logs(stdout=True, stderr=True).decode("utf-8")
+    Always call container.remove(force=True) in a finally block.
+    Returns TestResult dict.
+
+  def parse_pytest_output(self, stdout: str, exit_code: int) -> TestResult
+    Parses pytest output to extract:
+      - Total tests, passed, failed, errors from the summary line:
+        Pattern: r"(\d+) passed|(\d+) failed|(\d+) error"
+      - Duration from: r"(\d+\.\d+)s"
+    Sets status:
+      "pass" if exit_code == 0
+      "fail" if exit_code == 1
+      "error" if exit_code > 1 or exit_code < 0
+
+FILE: backend/agents/testing_agent.py
+---------------------------------------
+Implement TestingAgent class:
+
+  __init__(self, docker_sandbox: DockerSandbox, workspace_dir: str)
+
+  async def run(self, state: AgentState,
+                event_queue: asyncio.Queue) -> dict
+    Step 1: Emit "node_start" event
+    Step 2: Emit "Preparing test workspace..." log
+    Step 3: Prepare workspace using docker_sandbox.prepare_workspace()
+    Step 4: Emit "Spinning up Docker sandbox..." log
+    Step 5: Run tests in executor (to not block async loop):
+              loop = asyncio.get_event_loop()
+              test_result = await loop.run_in_executor(
+                  None,
+                  docker_sandbox.run_tests,
+                  workspace_path
+              )
+    Step 6: Emit "test_result" event with summary
+    Step 7: Emit individual log lines for each failed test (parse stdout)
+    Step 8: Emit "node_complete" event
+    Step 9: Return:
+            {
+              "test_result": test_result,
+              "retry_count": state["retry_count"],
+              "current_node": "testing",
+              "logs": [...]
+            }
+
+LANGGRAPH NODE FUNCTION:
+  async def testing_node(state, config) -> dict
+    (Standard pattern, same as previous chapters)
+    Important: increment retry_count in return dict ONLY if test failed.
+    Return {"retry_count": state["retry_count"] + 1, ...} on fail,
+    else {"retry_count": state["retry_count"], ...} on pass.
+
+================================================================================
+CHAPTER 07: PR AGENT
+================================================================================
+
+CURSOR PROMPT - CHAPTER 07:
+----------------------------
+This is Chapter 7 of the Multi-Agent Orchestration System.
+We are implementing the PR Agent — the final node that publishes results.
+
+FILE: backend/agents/pr_agent.py
+----------------------------------
+Implement PRAgent class:
+
+  __init__(self, model_name: str, github_tools: GitHubTools)
+
+  async def run(self, state: AgentState,
+                event_queue: asyncio.Queue) -> dict
+    Step 1: Emit "node_start" event
+    Step 2: Generate branch name:
+              f"auto-fix/issue-{state['issue_number']}-{run_id[:8]}"
+    Step 3: Emit "Creating branch {branch_name}..." log
+    Step 4: Create branch using github_tools.create_branch()
+    Step 5: Emit "Committing {len(file_changes)} file(s)..." log
+    Step 6: Generate commit message:
+              f"fix: resolve issue #{issue_number} - {patch_summary[:60]}"
+    Step 7: Commit files using github_tools.commit_files()
+    Step 8: Emit "Generating PR description..." log
+    Step 9: Call _generate_pr_description(state) via LLM
+    Step 10: Open PR using github_tools.open_pull_request()
+    Step 11: Emit "pr_created" event with pr_url
+    Step 12: Emit "node_complete" event
+    Step 13: Return:
+             {
+               "branch_name": branch_name,
+               "pr_url": pr_result["pr_url"],
+               "pr_number": pr_result["pr_number"],
+               "final_status": "success",
+               "current_node": "pr",
+               "logs": [...]
+             }
+
+  async def _generate_pr_description(self, state: AgentState) -> str
+    Uses LLM to generate the PR body markdown using the PR Agent system
+    prompt from SRS section 2.4.
+    Include: issue_number, patch_summary, test_result summary,
+    file_changes list.
+    Returns formatted markdown string.
+
+LANGGRAPH NODE FUNCTION:
+  async def pr_node(state, config) -> dict
+    Standard pattern. On exception, return error state but also emit
+    "run_failed" event to the WebSocket queue.
+
+================================================================================
+CHAPTER 08: ORCHESTRATOR & LANGGRAPH GRAPH ASSEMBLY
+================================================================================
+
+CURSOR PROMPT - CHAPTER 08:
+----------------------------
+This is Chapter 8 of the Multi-Agent Orchestration System.
+We are assembling the complete LangGraph StateGraph — the core of the system.
+
+FILE: backend/graph/router.py
+-------------------------------
+Implement routing logic:
+
+  MAX_RETRIES = int(os.getenv("AGENT_MAX_RETRIES", "3"))
+
+  def route_after_testing(state: AgentState) -> str
+    """Conditional edge router after the Testing node."""
+    test_result = state.get("test_result")
+    if test_result is None:
+        return "fail"
+    if test_result["status"] == "pass":
+        return "pass"
+    if state.get("retry_count", 0) < MAX_RETRIES:
+        return "retry"
+    return "fail"
+
+  def route_after_research(state: AgentState) -> str
+    """Optional: route to END immediately if research found a fatal error."""
+    if state.get("final_status") == "failed":
+        return "fail"
+    return "continue"
+
+FILE: backend/graph/orchestrator.py
+--------------------------------------
+Assemble the complete LangGraph graph:
+
+  from langgraph.graph import StateGraph, END
+  from langgraph.checkpoint.memory import MemorySaver
+
+  Import all node functions:
+    from agents.research_agent import research_node
+    from agents.coding_agent import coding_node
+    from agents.testing_agent import testing_node
+    from agents.pr_agent import pr_node
+    from graph.router import route_after_testing, route_after_research
+    from core.state import AgentState
+
+  def build_graph() -> CompiledGraph:
+    graph = StateGraph(AgentState)
+
+    # Add all nodes
+    graph.add_node("research", research_node)
+    graph.add_node("coding",   coding_node)
+    graph.add_node("testing",  testing_node)
+    graph.add_node("pr",       pr_node)
+
+    # Entry point
+    graph.set_entry_point("research")
+
+    # Add conditional edge after research (handles fatal research errors)
+    graph.add_conditional_edges(
+        "research",
+        route_after_research,
+        {"continue": "coding", "fail": END}
+    )
+
+    # Fixed edges
+    graph.add_edge("coding", "testing")
+
+    # Conditional edges after testing (the self-correction loop)
+    graph.add_conditional_edges(
+        "testing",
+        route_after_testing,
+        {
+            "pass":  "pr",
+            "retry": "coding",
+            "fail":  END
+        }
+    )
+
+    # Terminal edge
+    graph.add_edge("pr", END)
+
+    # Compile with in-memory checkpointer
+    checkpointer = MemorySaver()
+    return graph.compile(checkpointer=checkpointer)
+
+  # Singleton instance
+  compiled_graph = build_graph()
+
+  async def run_graph(initial_state: AgentState,
+                       event_queue: asyncio.Queue) -> AgentState:
+    """Execute the compiled graph for a single run."""
+    config = {
+        "configurable": {
+            "thread_id":    initial_state["run_id"],
+            "event_queue":  event_queue,
+            "workspace_dir": tempfile.mkdtemp(prefix=f"mao_{initial_state['run_id']}_")
+        }
+    }
+    final_state = None
+    async for state_snapshot in compiled_graph.astream(
+        initial_state,
+        config=config,
+        stream_mode="values"
+    ):
+        final_state = state_snapshot
+        # Emit full state update to WebSocket after each node
+        await event_queue.put({
+            "type":  "state_update",
+            "state": dict(final_state),
+            "run_id": initial_state["run_id"]
+        })
+    
+    # Emit terminal event
+    if final_state and final_state.get("final_status") == "success":
+        await event_queue.put({"type": "run_complete",
+                                "run_id": initial_state["run_id"],
+                                "pr_url": final_state.get("pr_url")})
+    else:
+        await event_queue.put({"type": "run_failed",
+                                "run_id": initial_state["run_id"],
+                                "error": final_state.get("error_message")})
+    
+    return final_state
+
+================================================================================
+CHAPTER 09: FASTAPI BACKEND & WEBSOCKET SERVER
+================================================================================
+
+CURSOR PROMPT - CHAPTER 09:
+----------------------------
+This is Chapter 9 of the Multi-Agent Orchestration System.
+We are implementing the complete FastAPI backend with REST endpoints
+and WebSocket streaming.
+
+FILE: backend/api/routes.py
+------------------------------
+Implement REST API routes using APIRouter:
+
+  router = APIRouter(prefix="/api")
+
+  POST /api/runs
+    Request body (Pydantic model RunCreateRequest):
+      issue_url: str (validate with regex pattern)
+      github_token: str (min_length=1)
+      model_name: str = "claude-sonnet-4-20250514"
+
+    Response model RunCreateResponse:
+      run_id: str
+      status: str
+      websocket_url: str
+
+    Logic:
+      1. Validate issue_url format with regex
+      2. Generate run_id = str(uuid.uuid4())
+      3. Parse issue_url to verify GitHub access (call github_tools.get_issue_details())
+         - On failure: raise HTTPException(400, "Cannot access GitHub issue")
+      4. Create initial_state via create_initial_state()
+      5. Create event queue: run_manager.create_run(run_id, initial_state)
+      6. Launch background task: asyncio.create_task(run_graph(initial_state, queue))
+      7. Return RunCreateResponse(
+            run_id=run_id,
+            status="started",
+            websocket_url=f"ws://localhost:8000/ws/{run_id}"
+         )
+
+  GET /api/runs/{run_id}
+    Returns current state snapshot from run_manager.get_state(run_id)
+    Raises 404 if run_id not found.
+
+  GET /api/health
+    Returns {"status": "ok", "docker_available": bool, "timestamp": str}
+
+FILE: backend/api/websocket.py
+---------------------------------
+Implement WebSocket endpoint using APIRouter:
+
+  ws_router = APIRouter()
+
+  @ws_router.websocket("/ws/{run_id}")
+  async def websocket_endpoint(websocket: WebSocket, run_id: str):
+    await websocket.accept()
+    event_queue = run_manager.get_queue(run_id)
+    
+    if not event_queue:
+        await websocket.close(code=4004, reason="Run not found")
+        return
+    
+    run_manager.mark_connected(run_id)
+    
+    try:
+        # Replay any buffered events first
+        buffered = []
+        while not event_queue.empty():
+            try:
+                buffered.append(event_queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        for event in buffered:
+            await websocket.send_json(event)
+        
+        # Live streaming loop
+        while True:
+            try:
+                event = await asyncio.wait_for(
+                    event_queue.get(),
+                    timeout=30.0
+                )
+                await websocket.send_json(event)
+                if event.get("type") in ("run_complete", "run_failed"):
+                    break
+            except asyncio.TimeoutError:
+                await websocket.send_json({"type": "ping",
+                                            "run_id": run_id})
+                
+    except WebSocketDisconnect:
+        run_manager.mark_disconnected(run_id)
+    except Exception as e:
+        await websocket.send_json({"type": "error", "message": str(e)})
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+FILE: backend/main.py (UPDATE)
+---------------------------------
+Update to include:
+  - CORS middleware with settings.FRONTEND_URL
+  - Include routes.router and websocket.ws_router
+  - Startup event: verify Docker is available, log system info
+  - Exception handler for unhandled errors (return 500 with run_id)
+  - Uvicorn run with reload=True in development
+
+================================================================================
+CHAPTER 10: REACT FRONTEND - PROJECT SETUP & LAYOUT
+================================================================================
+
+CURSOR PROMPT - CHAPTER 10:
+----------------------------
+This is Chapter 10 of the Multi-Agent Orchestration System.
+We are building the React frontend base structure, layout, and API client.
+
+FILE: frontend/src/types/agent.ts
+------------------------------------
+(Already defined in Chapter 02 - confirm it exists with all types)
+Add one more type:
+  interface WebSocketEvent {
+    type: "agent_log" | "node_start" | "node_complete" | "state_update" |
+          "diff_ready" | "test_result" | "pr_created" | "run_complete" |
+          "run_failed" | "ping" | "error"
+    run_id?: string
+    agent?: string
+    level?: string
+    message?: string
+    state?: AgentState
+    diff?: string
+    test_result?: TestResult
+    pr_url?: string
+    error?: string
+    timestamp?: string
+  }
+
+FILE: frontend/src/lib/api.ts
+--------------------------------
+Implement typed API client functions:
+  - createRun(issueUrl: string, githubToken: string, modelName?: string)
+      → Promise<{run_id: string, websocket_url: string}>
+    POST /api/runs, throws Error with message on non-200.
+
+  - getRun(runId: string) → Promise<AgentState>
+    GET /api/runs/{runId}
+
+  - checkHealth() → Promise<{status: string, docker_available: boolean}>
+
+FILE: frontend/src/hooks/useAgentStream.ts
+--------------------------------------------
+Implement the complete WebSocket hook as defined in SRS section 2.5.
+State managed:
+  - logs: AgentLog[] (append-only)
+  - agentStatuses: Record<string, "idle"|"running"|"complete"|"failed">
+  - currentState: AgentState | null
+  - diff: string | null
+  - testResult: TestResult | null
+  - prUrl: string | null
+  - runStatus: "idle"|"connecting"|"running"|"complete"|"failed"
+  - isConnected: boolean
+
+On "node_start": update agentStatuses[agent] = "running"
+On "node_complete": update agentStatuses[agent] = "complete"
+On "diff_ready": set diff
+On "test_result": set testResult
+On "pr_created": set prUrl
+On "run_complete": set runStatus = "complete"
+On "run_failed": set runStatus = "failed"
+On reconnect after disconnect: increment reconnectAttempt, wait
+  exponentially (1s, 2s, 4s, max 30s).
+
+Return: { logs, agentStatuses, currentState, diff, testResult,
+           prUrl, runStatus, isConnected }
+
+FILE: frontend/src/App.tsx
+----------------------------
+Simple layout with:
+  - Dark background (#0d1117 — GitHub dark)
+  - Header bar: "🤖 Multi-Agent Orchestration System" in green monospace
+  - Main content: <Dashboard /> component
+  - No routing needed (single page)
+
+FILE: frontend/src/pages/Dashboard.tsx
+-----------------------------------------
+Layout:
+  Left panel (35%):
+    - <IssueInputForm onRunCreated={handleRunCreated} />
+    - <AgentStatusBar agentStatuses={agentStatuses} />
+  Right panel (65%):
+    - <AgentTerminal logs={logs} isConnected={isConnected} />
+    - {diff && <DiffViewer diff={diff} />}
+    - {testResult && <TestResultPanel testResult={testResult} />}
+    - {prUrl && <PRResultCard prUrl={prUrl} />}
+
+Manages: runId state, calls useAgentStream(runId).
+handleRunCreated(runId: string): sets runId state.
+
+================================================================================
+CHAPTER 11: REACT FRONTEND - DASHBOARD COMPONENTS
+================================================================================
+
+CURSOR PROMPT - CHAPTER 11:
+----------------------------
+This is Chapter 11. We are implementing all React UI components.
+All components use TailwindCSS only (no inline styles), dark theme.
+
+COMPONENT 1: frontend/src/components/IssueInputForm.tsx
+---------------------------------------------------------
+Props: { onRunCreated: (runId: string) => void }
+
+UI:
+  - Card with dark background (#161b22)
+  - Title: "Start New Run" in green
+  - Input: "GitHub Issue URL" (full width, dark input style)
+    Placeholder: "https://github.com/owner/repo/issues/123"
+    Validate format on blur (regex check, show inline error)
+  - Input: "GitHub Token (PAT)" (type="password", full width)
+    Helper text: "Requires repo:read and pull_requests:write scopes"
+  - Select: "Model" with options:
+    * claude-sonnet-4-20250514 (default)
+    * claude-opus-4-20250514
+    * gpt-4o
+  - Button: "Run Agent" (green, full width, disabled during submission)
+    Shows spinner icon when loading.
+
+Logic:
+  - On submit: call api.createRun(), on success call onRunCreated(run_id)
+  - On error: show error message below button
+
+COMPONENT 2: frontend/src/components/AgentStatusBar.tsx
+---------------------------------------------------------
+Props: { agentStatuses: Record<string, string> }
+
+Renders 4 agent pills in a row: Research | Coding | Testing | PR
+Each pill shows:
+  - Agent icon (🔍 📝 🧪 🔀)
+  - Agent name
+  - Status badge: color-coded
+    IDLE → gray, RUNNING → yellow + pulse animation,
+    COMPLETE → green, FAILED → red
+
+COMPONENT 3: frontend/src/components/AgentTerminal.tsx
+-------------------------------------------------------
+Props: { logs: AgentLog[], isConnected: boolean }
+
+Use xterm.js Terminal with FitAddon for a real terminal experience.
+Initialize terminal with:
+  theme: { background: "#0d1117", foreground: "#e6edf3",
+           cursor: "#58a6ff" }
+  fontSize: 13, fontFamily: "JetBrains Mono, Consolas, monospace"
+
+On each new log entry (useEffect on logs):
+  Format as: "\r\n[{timestamp}] [{AGENT}] {message}"
+  Color-code by agent:
+    research → "\x1b[36m" (cyan)
+    coding   → "\x1b[33m" (yellow)
+    testing  → "\x1b[35m" (magenta)
+    pr       → "\x1b[32m" (green)
+    error    → "\x1b[31m" (red)
+  Auto-scroll to bottom on new line.
+
+Show connection status badge (green dot / red dot) in top-right of terminal.
+
+COMPONENT 4: frontend/src/components/DiffViewer.tsx
+-----------------------------------------------------
+Props: { diff: string }
+
+Parse unified diff string into old/new content per file.
+Use react-diff-viewer-continued component.
+Show filename header above each file diff.
+Dark theme (useDarkTheme prop).
+Collapsible by default (click to expand).
+
+COMPONENT 5: frontend/src/components/TestResultPanel.tsx
+---------------------------------------------------------
+Props: { testResult: TestResult }
+
+Card with:
+  - Header: "Test Results" + status badge (PASS in green / FAIL in red)
+  - Stats row: "X passed | Y failed | Z errors | Xs duration"
+  - Expandable stdout section (code block, dark bg, monospace)
+  - If failed: highlight failed test names (parse from stdout)
+
+COMPONENT 6: frontend/src/components/PRResultCard.tsx
+------------------------------------------------------
+Props: { prUrl: string }
+
+Success card with:
+  - Green checkmark icon (lucide-react CheckCircle2)
+  - "Pull Request Created Successfully!"
+  - Clickable PR URL button (opens in new tab)
+  - Confetti animation on mount (use a simple CSS keyframe animation)
+
+================================================================================
+CHAPTER 12: END-TO-END INTEGRATION & TESTING
+================================================================================
+
+CURSOR PROMPT - CHAPTER 12:
+----------------------------
+This is Chapter 12 of the Multi-Agent Orchestration System.
+We are wiring everything together and writing integration tests.
+
+TASK 1: VERIFY BACKEND WIRING
+-------------------------------
+In backend/main.py, confirm:
+  - app.include_router(routes.router)
+  - app.include_router(ws_router)
+  - CORS origins include "http://localhost:5173"
+
+Create backend/tests/test_integration.py with pytest tests:
+
+  test_health_endpoint():
+    Use httpx.AsyncClient to call GET /health.
+    Assert status 200, response contains "status": "ok".
+
+  test_create_run_invalid_url():
+    POST /api/runs with body {"issue_url": "https://notgithub.com/test",
+                               "github_token": "fake"}
+    Assert status 400.
+
+  test_state_schema_creation():
+    from core.state import create_initial_state
+    state = create_initial_state(
+        run_id="test-123",
+        issue_url="https://github.com/owner/repo/issues/42",
+        github_token="fake_token",
+        model_name="claude-sonnet-4-20250514"
+    )
+    Assert: state["repo_owner"] == "owner"
+    Assert: state["repo_name"] == "repo"
+    Assert: state["issue_number"] == 42
+    Assert: state["retry_count"] == 0
+    Assert: state["logs"] == []
+
+  test_router_logic():
+    from graph.router import route_after_testing
+    from core.state import AgentState
+
+    # Test pass route
+    state_pass = {..., "test_result": {"status": "pass"}, "retry_count": 0}
+    assert route_after_testing(state_pass) == "pass"
+
+    # Test retry route
+    state_fail = {..., "test_result": {"status": "fail"}, "retry_count": 0}
+    assert route_after_testing(state_fail) == "retry"
+
+    # Test max retries exhausted
+    state_max = {..., "test_result": {"status": "fail"}, "retry_count": 3}
+    assert route_after_testing(state_max) == "fail"
+
+  test_docker_tools_security():
+    from tools.docker_tools import DockerSandbox
+    sandbox = DockerSandbox()
+    # Test that container config has network_mode="none"
+    # Mock docker client to capture config
+    (Use unittest.mock to verify the container is created with correct params)
+
+TASK 2: FRONTEND TYPE SAFETY CHECK
+-------------------------------------
+In frontend/src/types/agent.ts:
+  Ensure AgentState has EXACTLY the same fields as the Python TypedDict.
+  Add type guards:
+    isAgentLog(event: WebSocketEvent): event is AgentLog
+    isStateUpdate(event: WebSocketEvent): event is {type: "state_update", state: AgentState}
+
+TASK 3: CREATE STARTUP SCRIPT
+--------------------------------
+Create run_dev.sh at project root:
+  #!/bin/bash
+  echo "Starting Multi-Agent Orchestration System..."
+  
+  # Start backend
+  cd backend
+  source .venv/bin/activate
+  uvicorn main:app --reload --host 0.0.0.0 --port 8000 &
+  BACKEND_PID=$!
+  
+  # Start frontend
+  cd ../frontend
+  npm run dev &
+  FRONTEND_PID=$!
+  
+  echo "Backend PID: $BACKEND_PID"
+  echo "Frontend PID: $FRONTEND_PID"
+  echo "Dashboard: http://localhost:5173"
+  echo "API Docs: http://localhost:8000/docs"
+  
+  # Trap Ctrl+C
+  trap "kill $BACKEND_PID $FRONTEND_PID; exit 0" INT
+  wait
+
+TASK 4: README.md
+-------------------
+Create a project-root README.md with:
+  - Project overview (2 paragraphs)
+  - Architecture diagram (ASCII art matching SRS section 2.1)
+  - Prerequisites: Python 3.11+, Node 18+, Docker Desktop
+  - Setup instructions (step by step)
+  - Environment variables table
+  - Usage: how to run a task
+  - Agent flow explanation
+
+================================================================================
+CHAPTER 13: SECURITY HARDENING & PRODUCTION CONFIG
+================================================================================
+
+CURSOR PROMPT - CHAPTER 13:
+----------------------------
+This is Chapter 13 — the final chapter. We are hardening the system for
+production readiness and ensuring all security requirements from SRS 2.6
+are properly implemented.
+
+TASK 1: TOKEN SCRUBBING
+-------------------------
+In backend/core/run_manager.py, update update_state():
+  Before storing the state, create a sanitized copy:
+    sanitized = dict(state)
+    sanitized["github_token"] = "[REDACTED]"
+  Store ONLY the sanitized state for get_state() API responses.
+  The actual token lives only in the active run context.
+
+In backend/api/routes.py, ensure the GET /api/runs/{run_id} endpoint
+returns the sanitized state (never the raw token).
+
+TASK 2: RATE LIMITING
+-----------------------
+Add slowapi rate limiting to FastAPI:
+  pip install slowapi
+  Apply to POST /api/runs:
+    @limiter.limit("5/minute")
+  Apply to GET /api/runs/{run_id}:
+    @limiter.limit("60/minute")
+
+TASK 3: DOCKER SECURITY AUDIT
+--------------------------------
+In backend/tools/docker_tools.py, add a method:
+  def verify_security_config(self, config: dict) -> None
+    Raises SecurityError if any of these are missing:
+      - network_mode == "none"
+      - mem_limit is set
+      - security_opt contains "no-new-privileges:true"
+      - cap_drop contains "ALL"
+    Call this method BEFORE running any container.
+
+TASK 4: WORKSPACE CLEANUP
+---------------------------
+In backend/graph/orchestrator.py, update run_graph():
+  Add a finally block that cleans up the workspace_dir:
+    import shutil
+    workspace = config["configurable"].get("workspace_dir")
+    if workspace and os.path.exists(workspace):
+        shutil.rmtree(workspace, ignore_errors=True)
+
+TASK 5: FRONTEND SECURITY
+---------------------------
+In frontend/src/components/IssueInputForm.tsx:
+  Add client-side validation:
+    - Issue URL: must match ^https://github\.com/[^/]+/[^/]+/issues/\d+$
+    - GitHub Token: must be 40+ chars, alphanumeric only (PAT format)
+    - Show specific error messages for each validation failure.
+
+In frontend/src/lib/api.ts:
+  Add a sanitizeForLogging(token: string) helper that returns
+  first 4 chars + "****" — use this if any logging is needed.
+  NEVER log the full token.
+
+TASK 6: PRODUCTION DOCKER-COMPOSE
+-----------------------------------
+Create docker-compose.yml at project root:
+  services:
+    backend:
+      build: ./backend
+      ports: ["8000:8000"]
+      environment:
+        - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+        - GITHUB_TOKEN=${GITHUB_TOKEN}
+      volumes:
+        - /var/run/docker.sock:/var/run/docker.sock
+        # Required: backend needs Docker socket to spin up sandbox containers
+      restart: unless-stopped
+
+    frontend:
+      build: ./frontend
+      ports: ["3000:80"]
+      depends_on: [backend]
+      environment:
+        - VITE_API_URL=http://backend:8000
+      restart: unless-stopped
+
+Create backend/Dockerfile:
+  FROM python:3.11-slim
+  WORKDIR /app
+  COPY requirements.txt .
+  RUN pip install --no-cache-dir -r requirements.txt
+  COPY . .
+  CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+Create frontend/Dockerfile:
+  FROM node:18-alpine AS build
+  WORKDIR /app
+  COPY package*.json .
+  RUN npm ci
+  COPY . .
+  RUN npm run build
+
+  FROM nginx:alpine
+  COPY --from=build /app/dist /usr/share/nginx/html
+  COPY nginx.conf /etc/nginx/conf.d/default.conf
+  EXPOSE 80
+
+Create frontend/nginx.conf:
+  Configure nginx to:
+    - Serve React app on /
+    - Proxy /api/ to backend:8000
+    - Proxy /ws/ to backend:8000 with WebSocket upgrade headers:
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+================================================================================
+FINAL NOTES FOR CURSOR USERS
+================================================================================
+
+RECOMMENDED ORDER OF EXECUTION:
+  1. Run Chapter 01 first — always. Get the scaffold.
+  2. Run Chapter 02 — state types must exist before anything else.
+  3. Run Chapters 03-08 in order — each agent depends on the previous.
+  4. Run Chapter 09 — backend must be complete before frontend.
+  5. Run Chapters 10-11 — frontend components.
+  6. Run Chapter 12 — integration wiring.
+  7. Run Chapter 13 — security (always last, before deployment).
+
+COMMON CURSOR TIPS:
+  - If Cursor generates placeholder functions, paste the chapter prompt
+    again with: "Complete all TODO / placeholder functions in this file."
+  - After each chapter, ask: "Run the tests for this chapter and fix
+    any import errors."
+  - For Chapter 06 (Docker), if Docker is not available in Cursor's
+    environment, ask: "Mock the docker client and write unit tests only."
+  - Use Cursor's @codebase context when asking about specific files.
+
+ENVIRONMENT CHECKLIST BEFORE RUNNING:
+  [ ] Docker Desktop is running
+  [ ] Python 3.11+ installed
+  [ ] Node.js 18+ installed
+  [ ] .env file created from .env.example
+  [ ] ANTHROPIC_API_KEY set
+  [ ] GITHUB_TOKEN set with repo:read + pull_requests:write scopes
+  [ ] Target GitHub repo is accessible with your token
+
+================================================================================
+END OF DOCUMENT
+Version 1.0 | Generated for Full-Stack Multi-Agent Orchestration System
+================================================================================
