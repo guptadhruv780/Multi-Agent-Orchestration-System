@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { IssueInputForm } from "../components/IssueInputForm";
 import { AgentTerminal } from "../components/AgentTerminal";
 import { AgentStatusBar } from "../components/AgentStatusBar";
@@ -9,63 +9,76 @@ import { useAgentStream } from "../hooks/useAgentStream";
 
 export function Dashboard() {
   const [runId, setRunId] = useState<string | null>(null);
-  const [history, setHistory] = useState<string[]>([]);
-  const { logs, state, status } = useAgentStream(runId);
+  const {
+    logs,
+    agentStatuses,
+    currentState,
+    diff,
+    testResult,
+    prUrl,
+    runStatus,
+    isConnected,
+  } = useAgentStream(runId);
 
-  const firstDiff = useMemo(() => {
-    const changes = state?.file_changes;
-    if (!changes?.length) return null;
-    return changes.map((c) => c.diff).join("\n");
-  }, [state]);
+  const displayDiff =
+    diff ??
+    (currentState?.file_changes?.length
+      ? currentState.file_changes.map((c) => c.diff).join("\n")
+      : null);
 
-  function handleSubmit(payload: { issueUrl: string; githubToken: string; modelName: string }) {
-    void payload;
-    const id = crypto.randomUUID();
-    setHistory((h) => [id, ...h].slice(0, 20));
+  const displayTestResult = testResult ?? currentState?.test_result ?? null;
+  const displayPrUrl = prUrl ?? currentState?.pr_url ?? null;
+
+  function handleRunCreated(id: string) {
     setRunId(id);
   }
 
+  const isSubmitting =
+    runStatus === "connecting" || runStatus === "running";
+
   return (
-    <div className="flex h-full flex-col bg-zinc-950 text-zinc-100 md:flex-row">
-      <aside className="w-full border-b border-zinc-800 p-4 md:w-[30%] md:border-b-0 md:border-r">
-        <h1 className="mb-4 text-lg font-semibold tracking-tight">Orchestrator</h1>
-        <IssueInputForm onSubmitRun={handleSubmit} disabled={status === "running"} />
+    <div className="flex h-full min-h-[calc(100vh-4.5rem)] flex-col lg:flex-row">
+      <aside className="w-full border-b border-[#30363d] bg-[#0d1117] p-4 lg:w-[35%] lg:border-b-0 lg:border-r">
+        <IssueInputForm
+          onRunCreated={handleRunCreated}
+          disabled={isSubmitting}
+        />
         <div className="mt-6">
-          <h2 className="mb-2 text-xs font-semibold uppercase text-zinc-500">Recent run ids (local)</h2>
-          <ul className="max-h-40 space-y-1 overflow-auto text-xs text-zinc-400">
-            {history.map((id) => (
-              <li key={id}>
-                <button type="button" className="truncate text-left hover:text-zinc-200" onClick={() => setRunId(id)}>
-                  {id}
-                </button>
-              </li>
-            ))}
-          </ul>
+          <AgentStatusBar agentStatuses={agentStatuses} />
         </div>
+        {currentState && (
+          <div className="mt-4 rounded-md border border-[#30363d] bg-[#161b22] p-3">
+            <p className="text-xs font-medium uppercase tracking-wide text-[#8b949e]">
+              Run
+            </p>
+            <p className="mt-1 truncate font-mono text-xs text-[#e6edf3]">
+              {currentState.run_id}
+            </p>
+            <p className="mt-1 text-xs text-[#8b949e]">
+              {currentState.repo_owner}/{currentState.repo_name} #
+              {currentState.issue_number}
+            </p>
+          </div>
+        )}
       </aside>
-      <main className="flex flex-1 flex-col gap-4 p-4 md:w-[70%]">
-        <AgentStatusBar active={null} />
-        <div className="min-h-0 flex-1">
-          <AgentTerminal logs={logs} />
-        </div>
-        <div className="grid gap-4 md:grid-cols-2">
-          <section>
-            <h2 className="mb-2 text-sm font-medium text-zinc-400">Diff</h2>
-            <DiffViewer diff={firstDiff} />
-          </section>
-          <section>
-            <h2 className="mb-2 text-sm font-medium text-zinc-400">Tests</h2>
-            <TestResultPanel result={state?.test_result ?? null} />
-          </section>
-        </div>
-        <section>
-          <h2 className="mb-2 text-sm font-medium text-zinc-400">State</h2>
-          <pre className="max-h-48 overflow-auto rounded border border-zinc-800 bg-zinc-900/50 p-2 text-xs">
-            {state ? JSON.stringify(state, null, 2) : "—"}
-          </pre>
-        </section>
-        <PRResultCard prUrl={state?.pr_url ?? null} />
-      </main>
+
+      <section className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-4 lg:w-[65%]">
+        <AgentTerminal logs={logs} isConnected={isConnected} />
+
+        {displayDiff && <DiffViewer diff={displayDiff} />}
+
+        {displayTestResult && (
+          <TestResultPanel testResult={displayTestResult} />
+        )}
+
+        {displayPrUrl && <PRResultCard prUrl={displayPrUrl} />}
+
+        {runStatus === "failed" && currentState?.error_message && (
+          <div className="rounded-md border border-[#f85149]/40 bg-[#f85149]/10 px-4 py-3 text-sm text-[#ff7b72]">
+            {currentState.error_message}
+          </div>
+        )}
+      </section>
     </div>
   );
 }

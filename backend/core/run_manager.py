@@ -15,13 +15,19 @@ class RunManager:
     def __init__(self) -> None:
         self._runs: Dict[str, Dict[str, Any]] = {}
 
+    @staticmethod
+    def _sanitize_state(state: AgentState) -> AgentState:
+        sanitized: AgentState = dict(state)  # type: ignore[typeddict-item]
+        sanitized["github_token"] = "[REDACTED]"
+        return sanitized
+
     def create_run(self, run_id: str, initial_state: AgentState) -> asyncio.Queue:
         """Register a run and return its bounded event queue (max 1000 events)."""
         queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
         self._runs[run_id] = {
             "queue": queue,
             "status": initial_state["final_status"],
-            "state": initial_state,
+            "state": self._sanitize_state(initial_state),
             "connected": True,
         }
         return queue
@@ -37,7 +43,7 @@ class RunManager:
             return
         state: AgentState = run["state"]
         merged: AgentState = {**state, **state_update}  # type: ignore[typeddict-item]
-        run["state"] = merged
+        run["state"] = self._sanitize_state(merged)
         if "final_status" in state_update:
             run["status"] = state_update["final_status"]
 

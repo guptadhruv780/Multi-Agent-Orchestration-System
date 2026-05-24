@@ -12,10 +12,14 @@ class Settings(BaseSettings):
 
     anthropic_api_key: str = ""
     openai_api_key: str = ""
+    gemini_api_key: str = ""
+    deepseek_api_key: str = ""
+    deepseek_base_url: str = "https://api.deepseek.com"
     github_token: str = ""
-    default_model: str = "claude-sonnet-4-20250514"
+    default_model: str = "deepseek-ai/deepseek-v4-pro"
     max_retries: int = 3
     docker_base_image: str = "python:3.11-slim"
+    allow_docker_network: bool = False
     backend_host: str = "0.0.0.0"
     backend_port: int = 8000
     frontend_url: str = "http://localhost:5173"
