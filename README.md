@@ -1,4 +1,4 @@
-# Multi-Agent Orchestration System
+# Multi-Agent Orchestration System.
 
 An autonomous AI software engineering platform that takes a **GitHub issue URL** and produces a **pull request** with a tested fix. Specialized agents research the repository, generate patches, validate them in an isolated Docker sandbox, and open a PR—while the React dashboard streams every step over WebSockets.
 
